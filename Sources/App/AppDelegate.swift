@@ -448,7 +448,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             hookBridge.$pending
                 .removeDuplicates()
                 .receive(on: RunLoop.main)
-                .sink { [weak fleet] pending in fleet?.setPermissionRequests(pending) }
+                .sink { [weak self, weak fleet] pending in
+                    fleet?.setPermissionRequests(pending)
+                    self?.dropCompletionsCoveredByPrompts()
+                }
                 .store(in: &cancellables)
             self.settings = settings
 
@@ -1015,6 +1018,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let before = completionQueue.events
         completionQueue.absorb(preferences.announceSessionEnd ? fresh : [], sessions: sessions)
+        completionQueue.removeBlocked(askingFrom: promptingPIDs)
+        if completionQueue.events != before { publishCompletions() }
+    }
+
+    /// The processes with a prompt on the notch right now.
+    @MainActor private var promptingPIDs: Set<pid_t> {
+        Set(hookBridge?.pending.compactMap(\.processID) ?? [])
+    }
+
+    /// The prompt and the session's "waiting" state arrive separately, in
+    /// either order, so this runs on both.
+    @MainActor
+    private func dropCompletionsCoveredByPrompts() {
+        let before = completionQueue.events
+        completionQueue.removeBlocked(askingFrom: promptingPIDs)
         if completionQueue.events != before { publishCompletions() }
     }
 

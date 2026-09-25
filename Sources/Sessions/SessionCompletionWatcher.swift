@@ -105,6 +105,12 @@ struct CompletionQueue {
         }
     }
 
+    /// A "Needs you" card for a session whose prompt is already on the notch
+    /// says the same thing twice; the prompt's own card is the one to answer.
+    mutating func removeBlocked(askingFrom pids: Set<pid_t>) {
+        events.removeAll { $0.reason == .blocked && $0.session.processID.map(pids.contains) == true }
+    }
+
     mutating func remove(_ event: Event) {
         events.removeAll { Self.sameSession($0, event) }
     }

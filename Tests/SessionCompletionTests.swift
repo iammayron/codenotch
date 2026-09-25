@@ -238,6 +238,22 @@ final class CompletionQueueTests: XCTestCase {
         XCTAssertTrue(queue.events.isEmpty)
     }
 
+    /// The question's own card is on the notch; a "Needs you" for the same
+    /// process would be a second card for one prompt. "Done" cards stay.
+    func testNeedsYouGivesWayToThePromptItself() {
+        func event(_ id: String, _ reason: SessionCompletionWatcher.Reason, pid: pid_t) -> SessionCompletionWatcher.Event {
+            .init(session: AgentSession(id: id, name: id, detail: "", state: reason == .blocked ? .waiting : .idle,
+                                        waitingFor: nil, since: Date(), processID: pid),
+                  reason: reason, providerID: "claude")
+        }
+        var queue = CompletionQueue()
+        let live = ["claude": [session("a", .waiting), session("b", .waiting), session("c", .idle)]]
+        queue.absorb([event("c", .finished, pid: 7), event("b", .blocked, pid: 8), event("a", .blocked, pid: 7)],
+                     sessions: live)
+        queue.removeBlocked(askingFrom: [7])
+        XCTAssertEqual(queue.events.map(\.session.id), ["b", "c"])
+    }
+
     func testRemovingOneBringsUpTheNext() {
         var queue = CompletionQueue()
         queue.absorb([event("b"), event("a")], sessions: ["claude": [session("a", .idle), session("b", .idle)]])
