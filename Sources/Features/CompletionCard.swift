@@ -3,16 +3,18 @@ import SwiftUI
 /// What the notch says when an agent session stops: which one, whether it is
 /// done or needs you, and that a click goes there.
 ///
-/// Shown for the length of the completion peek, beside the ring the session
-/// belongs to. The whole card is the target — a click anywhere on the peeking
-/// notch already jumps to the session (`pendingFocus`), so the card only has
-/// to say so. Built like `UsageResetCard`: same surface, tail and faces.
+/// Shown beside the ring the session belongs to until it is clicked or its app
+/// comes to the front (`CompletionQueue`); the next one waiting takes its
+/// place. The whole card is the target. Built like `UsageResetCard`: same
+/// surface, tail and faces.
 struct CompletionCard: View {
     let event: SessionCompletionWatcher.Event
     let glyph: ProviderGlyph
     let direction: NotchEdge.TooltipDirection
     var tailOffset: CGFloat = 0
     var hovered = false
+    /// How many more stopped sessions wait behind this one.
+    var queued = 0
 
     @Environment(\.codenotchReduceTransparency) private var reduceTransparency
     @Environment(\.notchSurfaceStyle) private var surfaceStyle
@@ -32,7 +34,8 @@ struct CompletionCard: View {
     private var surfaceFill: Color { glassy ? .clear : Palette.card }
 
     private var statusText: String {
-        event.reason == .blocked ? L10n.t("Needs you — click to jump") : L10n.t("Done — click to jump")
+        let status = event.reason == .blocked ? L10n.t("Needs you — click to jump") : L10n.t("Done — click to jump")
+        return queued > 0 ? status + " · " + L10n.t("\(queued) more waiting") : status
     }
     private var statusColor: Color { event.reason == .blocked ? Palette.watch : Palette.ample }
 

@@ -871,7 +871,7 @@ final class Preferences: ObservableObject {
         self.announceSessionEnd = defaults.object(forKey: Keys.announceSessionEnd) as? Bool ?? true
         self.sessionEndSound = defaults.object(forKey: Keys.sessionEndSound) as? Bool ?? true
         self.peekDuration = defaults.string(forKey: Keys.peekDuration)
-            .flatMap(PeekDuration.init(rawValue:)) ?? .standard
+            .flatMap(PeekDuration.init(rawValue:)) ?? .untilSeen
         self.sessionEndSoundName = defaults.string(forKey: Keys.sessionEndSoundName)
             ?? SessionChime.defaultFinished
         self.sessionBlockedSoundName = defaults.string(forKey: Keys.sessionBlockedSoundName)

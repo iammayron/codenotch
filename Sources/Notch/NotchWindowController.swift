@@ -61,14 +61,6 @@ final class NotchWindowController {
     private var foldWork: DispatchWorkItem?
     /// Folds the notch again after a peek, when nothing else is holding it open.
     private var peekWork: DispatchWorkItem?
-    /// The session a peek is currently offering, and how long the offer lasts.
-    ///
-    /// A click on the open notch normally pins it or refetches a ring; while
-    /// this is set and unexpired it jumps to the session instead. The expiry is
-    /// what keeps the two apart — without it, the *next* click on the notch,
-    /// minutes later and about something else, would still be raising a
-    /// terminal window.
-    private var pendingFocus: (pid: pid_t, until: Date)?
     /// Re-asserts the pointing hand while it is wanted — see `setPointing`.
     private var pointingTimer: Timer?
     /// When the current peek's five seconds are up.
@@ -648,7 +640,7 @@ final class NotchWindowController {
         // The panel's size counts a pending card; re-solve it.
         relocate()
         if requests.isEmpty {
-            if !wasEmpty, let panel, !liveRect.contains(localCursor(in: panel.frame)) {
+            if !wasEmpty, model.completions.isEmpty, let panel, !liveRect.contains(localCursor(in: panel.frame)) {
                 setExpanded(false)
             }
         } else if visibility != .hidden, let panel {
@@ -674,23 +666,25 @@ final class NotchWindowController {
         )
     }
 
-    /// Open the notch on a session that just stopped, with a card saying which
-    /// and that a click goes there. The click itself is the peek's own offer
-    /// (`pendingFocus`); the card lasts exactly as long as that offer shows.
-    @discardableResult
-    func showCompletion(_ event: SessionCompletionWatcher.Event, duration: TimeInterval) -> Bool {
-        guard visibility != .hidden, panel != nil else { return false }
-        withAnimation(.easeOut(duration: 0.18)) { model.activeCompletion = event }
-        peek(for: duration, focusing: event.session.processID)
-        DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
-            MainActor.assumeIsolated {
-                guard let self, self.model.activeCompletion == event else { return }
-                withAnimation(.easeOut(duration: 0.18)) { self.model.activeCompletion = nil }
-                self.model.isHoveringCompletion = false
-                self.updateInteractiveRects()
+    /// Open the notch on the stopped sessions and hold it open until the queue
+    /// is empty, the way a permission request does. A permission card goes
+    /// first; this one shows once there is none.
+    func showCompletions(_ events: [SessionCompletionWatcher.Event]) {
+        let wasEmpty = model.completions.isEmpty
+        withAnimation(.easeOut(duration: 0.18)) { model.completions = events }
+        if events.isEmpty {
+            model.isHoveringCompletion = false
+            if !wasEmpty, model.permissionRequests.isEmpty, !model.isPinned, let panel,
+               !liveRect.contains(localCursor(in: panel.frame)) {
+                setExpanded(false)
             }
+        } else if visibility != .hidden, let panel {
+            if !Runtime.isUnderTest { panel.orderFrontRegardless() }
+            foldWork?.cancel()
+            foldWork = nil
+            withAnimation(NotchMotion.unfold) { model.isExpanded = true }
         }
-        return true
+        updateInteractiveRects()
     }
 
     private func resetCardRect(event: UsageResetEvent) -> CGRect? {
@@ -905,8 +899,9 @@ final class NotchWindowController {
         // A peek holds the notch open for its own duration; only after that
         // does the pointer get a say again.
         if let peekUntil, peekUntil > Date() { return }
-        // So does a request Claude Code is waiting on: it stays until answered.
-        if !model.permissionRequests.isEmpty { return }
+        // So does a request Claude Code is waiting on: it stays until answered,
+        // and a stopped session's card, until it is looked at.
+        if !model.permissionRequests.isEmpty || !model.completions.isEmpty { return }
         guard model.isExpanded, foldWork == nil, !model.isPinned else { return }
         // Pinned is settled above; what is left to decide is whether "Always
         // show" holds it, and only a frontmost full-screen app overrules that.
@@ -990,24 +985,11 @@ final class NotchWindowController {
             onOpenSettings?()
             return
         }
-        // A peek is a question — "this one just finished, do you want it?" —
-        // and the click that follows is the answer. It outranks pinning and
-        // refetching for as long as the offer stands, and for no longer.
-        //
-        // Tested before the folded case below, not after: the grace period
-        // outlives the peek by a couple of seconds precisely so that a hand
-        // that arrived late still lands on the session, and answering it by
-        // merely re-opening the notch would waste that click.
-        if takePendingFocus() {
-            peekWork?.cancel()
-            peekWork = nil
-            peekUntil = nil
-            withAnimation(NotchMotion.unfold) {
-                model.isExpanded = false
-                model.hoveredIndex = nil
-            }
-            setPointing(false)
-            updateInteractiveRects()
+        // The completion card is the question "this one stopped, do you want
+        // it?", and a click on it is the answer: jump there, next card up.
+        if model.isExpanded, model.hoveredIndex == nil, model.permissionRequests.isEmpty,
+           let event = model.activeCompletion, completionCardRect()?.contains(local) == true {
+            model.onOpenCompletion?(event)
             return
         }
         // Clicks on the tooltip card belong to whatever is drawn there — the
@@ -1349,10 +1331,7 @@ final class NotchWindowController {
     /// checks the same two conditions the hover fold does — pinned open, or the
     /// pointer now resting on it — because a peek that arrives while you are
     /// already reading the notch must not yank it shut underneath you.
-    ///
-    /// `pid` is the agent's process, used only if the peek is clicked; nil
-    /// leaves the click doing what it ordinarily does.
-    func peek(for duration: TimeInterval, focusing pid: pid_t?) {
+    func peek(for duration: TimeInterval) {
         // Hidden is a standing choice that the notch is not to be on screen.
         // Something finishing is not grounds to overrule it — the chime still
         // sounds, which is the part that works with nothing visible.
@@ -1360,11 +1339,8 @@ final class NotchWindowController {
             Log.usage.debug("peek skipped: notch hidden")
             return
         }
-        Log.usage.debug("peek for \(duration, privacy: .public)s, pid \(pid ?? -1, privacy: .public)")
+        Log.usage.debug("peek for \(duration, privacy: .public)s")
 
-        if let pid {
-            pendingFocus = (pid: pid, until: Date().addingTimeInterval(duration + Self.focusGrace))
-        }
         peekUntil = Date().addingTimeInterval(duration)
 
         if !Runtime.isUnderTest { panel.orderFrontRegardless() }
@@ -1380,6 +1356,7 @@ final class NotchWindowController {
                 self.peekWork = nil
                 self.peekUntil = nil
                 let stillHoldsOpen = self.model.isPinned || !self.model.permissionRequests.isEmpty
+                    || !self.model.completions.isEmpty
                     || (self.model.isAlwaysOn && !(self.foldsForFullScreen && self.isFullScreenActive()))
                 guard !stillHoldsOpen else { return }
                 // Left open if the peek did its job and the pointer is already
@@ -1409,7 +1386,7 @@ final class NotchWindowController {
             return false
         }
         model.activeResetAlert = event
-        peek(for: duration, focusing: nil)
+        peek(for: duration)
 
         DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
             MainActor.assumeIsolated {
@@ -1422,22 +1399,6 @@ final class NotchWindowController {
                 }
             }
         }
-        return true
-    }
-
-    /// How long after a peek folds a click still counts as answering it. Covers
-    /// the reach for the mouse that started while the notch was still open.
-    private static let focusGrace: TimeInterval = 2
-
-    /// Raise the terminal the peeked session is running in, if the offer stands.
-    private func takePendingFocus() -> Bool {
-        guard let pending = pendingFocus, pending.until > Date() else {
-            pendingFocus = nil
-            return false
-        }
-        pendingFocus = nil
-        // The same exact-tab jump a session row gives, not just the app.
-        Task { _ = await SessionFocus.focus(pid: pending.pid) }
         return true
     }
 

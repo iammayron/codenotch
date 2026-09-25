@@ -110,7 +110,8 @@ struct NotchRootView: View {
                         glyph: snapshot.glyph,
                         direction: model.edge.tooltipDirection,
                         tailOffset: tooltipTailOffset(index: index, snapshot: snapshot),
-                        hovered: model.isHoveringCompletion
+                        hovered: model.isHoveringCompletion,
+                        queued: model.completions.count - 1
                     )
                     .position(completionCardCentre(place, index: index))
                     .transition(.opacity.combined(with: .offset(

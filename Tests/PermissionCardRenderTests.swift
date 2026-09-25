@@ -47,10 +47,13 @@ final class PermissionCardRenderTests: XCTestCase {
         model.edge = .right
         model.snapshots = Fixtures.snapshots()
         model.isExpanded = true
-        model.activeCompletion = SessionCompletionWatcher.Event(
-            session: AgentSession(id: "claude.1", name: "fix auth bug", detail: "iTerm2 · api",
-                                  state: .idle, waitingFor: nil, since: Date(), processID: 1),
-            reason: .finished, providerID: "claude")
+        // Two waiting, so the first card shows "1 more waiting".
+        model.completions = ["claude.1", "claude.2"].map { id in
+            SessionCompletionWatcher.Event(
+                session: AgentSession(id: id, name: "fix auth bug", detail: "iTerm2 · api",
+                                      state: .idle, waitingFor: nil, since: Date(), processID: 1),
+                reason: .finished, providerID: "claude")
+        }
         let renderer = ImageRenderer(content: NotchRootView(model: model)
             .frame(width: model.panelSize.width, height: model.panelSize.height)
             .background(Color(white: 0.45))

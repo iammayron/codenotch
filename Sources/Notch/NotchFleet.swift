@@ -80,6 +80,8 @@ final class NotchFleet {
     var onFocusSession: ((pid_t) -> Void)?
     var onDecidePermission: ((UUID, PermissionDecision) -> Void)?
     private var permissionRequests: [PermissionRequest] = []
+    var onOpenCompletion: ((SessionCompletionWatcher.Event) -> Void)?
+    private var completions: [SessionCompletionWatcher.Event] = []
     var signInItems: [(title: String, action: () -> Void)] = []
     /// An ⌥-drag on any one panel settled at a new offset. Persisting it is
     /// Preferences' job, same division `apply(edge:)` already keeps.
@@ -310,9 +312,9 @@ final class NotchFleet {
     /// Opens every panel for a moment, because something happened — the same
     /// announcement on every display rather than only the one you happen to
     /// be looking at.
-    func peek(for duration: TimeInterval, focusing pid: pid_t?) {
+    func peek(for duration: TimeInterval) {
         for controller in controllers.values {
-            controller.peek(for: duration, focusing: pid)
+            controller.peek(for: duration)
         }
     }
 
@@ -328,8 +330,10 @@ final class NotchFleet {
         return shown
     }
 
-    func showCompletion(_ event: SessionCompletionWatcher.Event, duration: TimeInterval) {
-        for controller in controllers.values { controller.showCompletion(event, duration: duration) }
+    /// Every notch shows the same queue, as with permission requests.
+    func setCompletions(_ events: [SessionCompletionWatcher.Event]) {
+        completions = events
+        for controller in controllers.values { controller.showCompletions(events) }
     }
 
     /// Every notch shows the same request; answering on one clears them all.
@@ -467,6 +471,8 @@ final class NotchFleet {
         controller.model.onFocusSession = onFocusSession
         controller.model.onDecidePermission = onDecidePermission
         controller.showPermissionRequests(permissionRequests)
+        controller.model.onOpenCompletion = onOpenCompletion
+        controller.showCompletions(completions)
         controller.onReposition = onReposition
         controller.onMoveToEdge = onMoveToEdge
         controller.signInItems = signInItems

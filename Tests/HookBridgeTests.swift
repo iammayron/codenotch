@@ -125,6 +125,13 @@ final class HookBridgeTests: XCTestCase {
         XCTAssertEqual(PermissionDecision.passThrough.responseBody(for: request), Data("{}".utf8))
     }
 
+    /// Every allow echoes the input: an SDK host ignores an allow without it.
+    func testAllowEchoesTheInput() throws {
+        let request = try XCTUnwrap(PermissionRequest.decode(payload(tool: "Bash", input: #"{"command":"ls"}"#)))
+        let updated = decision(PermissionDecision.allow.responseBody(for: request))?["updatedInput"] as? [String: String]
+        XCTAssertEqual(updated, ["command": "ls"])
+    }
+
     /// The answer rides back as the original input plus `answers`: anything
     /// dropped from `questions` would be dropped for the tool too.
     func testAnswerEchoesTheInputWithAnswers() throws {
@@ -156,6 +163,36 @@ final class HookBridgeTests: XCTestCase {
 
         let body = try await response.value
         XCTAssertEqual(decision(body)?["behavior"] as? String, "allow")
+        XCTAssertTrue(bridge.pending.isEmpty)
+    }
+
+    /// A browser always sends Origin; Claude Code never does. A web page must
+    /// not be able to put a card on the notch.
+    @MainActor
+    func testServerRefusesARequestWithAnOrigin() async throws {
+        let bridge = HookBridge()
+        bridge.start(port: 11498)
+        defer { Task { await bridge.stop() } }
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        var post = URLRequest(url: URL(string: "http://127.0.0.1:11498\(HookBridgeServer.path)")!)
+        post.httpMethod = "POST"
+        post.setValue("https://example.com", forHTTPHeaderField: "Origin")
+        post.httpBody = payload(tool: "Bash", input: #"{"command":"ls"}"#)
+        let (_, response) = try await URLSession.shared.data(for: post)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 403)
+        XCTAssertTrue(bridge.pending.isEmpty)
+    }
+
+    /// A card nobody answers hands the prompt back rather than hold the session.
+    @MainActor
+    func testUnansweredRequestIsHandedBack() async throws {
+        let bridge = HookBridge(giveUpAfter: 0.2)
+        let request = try XCTUnwrap(PermissionRequest.decode(payload(tool: "Bash", input: #"{"command":"ls"}"#)))
+        let handedBack = expectation(description: "handed back")
+        bridge.receive(request) { if $0 == .passThrough { handedBack.fulfill() } }
+        XCTAssertEqual(bridge.pending.count, 1)
+        await fulfillment(of: [handedBack], timeout: 2)
         XCTAssertTrue(bridge.pending.isEmpty)
     }
 

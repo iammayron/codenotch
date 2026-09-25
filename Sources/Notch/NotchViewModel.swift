@@ -84,8 +84,12 @@ final class NotchViewModel: ObservableObject {
 
     /// Active usage reset notification event to present beside the notch.
     @Published var activeResetAlert: UsageResetEvent?
-    /// The session that just stopped, shown for the length of its peek.
-    @Published var activeCompletion: SessionCompletionWatcher.Event?
+    /// Stopped sessions waiting to be looked at, oldest first — see
+    /// `CompletionQueue`. The first is on screen, behind any permission card.
+    @Published var completions: [SessionCompletionWatcher.Event] = []
+    var activeCompletion: SessionCompletionWatcher.Event? { completions.first }
+    /// Wired by the app delegate: jump to the session and clear its card.
+    var onOpenCompletion: ((SessionCompletionWatcher.Event) -> Void)?
     /// The pointer is on the completion card.
     @Published var isHoveringCompletion = false
 
