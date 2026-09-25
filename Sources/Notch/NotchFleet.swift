@@ -78,6 +78,8 @@ final class NotchFleet {
     var onRefreshProvider: ((String) async -> Void)?
     var onOpenSettings: (() -> Void)?
     var onFocusSession: ((pid_t) -> Void)?
+    var onDecidePermission: ((UUID, PermissionDecision) -> Void)?
+    private var permissionRequests: [PermissionRequest] = []
     var signInItems: [(title: String, action: () -> Void)] = []
     /// An ⌥-drag on any one panel settled at a new offset. Persisting it is
     /// Preferences' job, same division `apply(edge:)` already keeps.
@@ -326,6 +328,16 @@ final class NotchFleet {
         return shown
     }
 
+    func showCompletion(_ event: SessionCompletionWatcher.Event, duration: TimeInterval) {
+        for controller in controllers.values { controller.showCompletion(event, duration: duration) }
+    }
+
+    /// Every notch shows the same request; answering on one clears them all.
+    func setPermissionRequests(_ requests: [PermissionRequest]) {
+        permissionRequests = requests
+        for controller in controllers.values { controller.showPermissionRequests(requests) }
+    }
+
     func setRefreshing(_ ids: Set<String>) {
         self.refreshing = ids
         for controller in controllers.values {
@@ -453,6 +465,8 @@ final class NotchFleet {
         controller.onOpenSettings = onOpenSettings
         controller.model.onOpenSettings = onOpenSettings
         controller.model.onFocusSession = onFocusSession
+        controller.model.onDecidePermission = onDecidePermission
+        controller.showPermissionRequests(permissionRequests)
         controller.onReposition = onReposition
         controller.onMoveToEdge = onMoveToEdge
         controller.signInItems = signInItems

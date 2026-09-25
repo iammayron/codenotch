@@ -69,6 +69,8 @@ final class NotchWindowController {
     /// minutes later and about something else, would still be raising a
     /// terminal window.
     private var pendingFocus: (pid: pid_t, until: Date)?
+    /// Re-asserts the pointing hand while it is wanted — see `setPointing`.
+    private var pointingTimer: Timer?
     /// When the current peek's five seconds are up.
     ///
     /// The hover fold has to be told to leave it alone until then. Without
@@ -484,7 +486,9 @@ final class NotchWindowController {
             groupCount: snapshot.windowGroupCount,
             moneyWindowCount: snapshot.windows.filter { $0.money != nil }.count,
             usageDetailGroupCount: snapshot.usageDetail?.visibleGroups.count ?? 0,
-            sessionCount: snapshot.localModel == nil ? (model.activity(for: snapshot.id)?.sessions.count ?? 0) : 0,
+            sessionCount: snapshot.localModel == nil ? (model.activity(for: snapshot.id)?.listedSessions(now: model.now, showingIdle: model.showsIdleSessions).count ?? 0) : 0,
+            foldedSessions: snapshot.localModel == nil ? (model.activity(for: snapshot.id)?.foldedIdleCount(now: model.now) ?? 0) : 0,
+            idleRows: snapshot.localModel == nil ? (model.activity(for: snapshot.id)?.sessionGroups(now: model.now, cap: model.sessionCap, showingIdle: model.showsIdleSessions).idle.count ?? 0) : 0,
             sessionCap: model.sessionCap,
             statusMessage: snapshot.statusMessage,
             blockMessage: snapshot.block?.summary(now: model.now),
@@ -512,6 +516,183 @@ final class NotchWindowController {
         )
     }
 
+    /// The clickable session row under `local`, if the tooltip is showing one.
+    ///
+    /// Solved from the same figures that size the card: the list is the last
+    /// thing in it, so rows are counted up from the card's bottom edge — past
+    /// the padding and the "N more / N idle" line — using the row height
+    /// `NotchLayout.cardHeight` budgets. Only rows with a pid count; the rest
+    /// have nowhere to go.
+    private func sessionRow(at local: CGPoint) -> AgentSession? {
+        guard let list = sessionList(containing: local) else { return nil }
+        let row = list.rows.first { $0.rect.contains(local) }?.session
+        return row?.processID == nil ? nil : row
+    }
+
+    /// Whether `local` is on the "N idle" / "Hide idle" line — only when
+    /// there are idle sessions for it to open or fold.
+    private func isOverIdleToggle(_ local: CGPoint) -> Bool {
+        sessionList(containing: local)?.idleToggle?.contains(local) ?? false
+    }
+
+    /// Where the showing tooltip's session rows and its closing line sit.
+    private func sessionList(containing local: CGPoint)
+    -> (rows: [(rect: CGRect, session: AgentSession)], idleToggle: CGRect?)? {
+        guard model.isExpanded, let index = model.hoveredIndex,
+              model.snapshots.indices.contains(index),
+              model.snapshots[index].localModel == nil,
+              let rect = tooltipRect(index: index), rect.contains(local),
+              let activity = model.activity(for: model.snapshots[index].id) else { return nil }
+
+        let depth = rect.width - NotchLayout.cardWidth   // the tail, on a side edge
+        let card: CGRect
+        switch model.edge.tooltipDirection {
+        case .leading:  card = CGRect(x: rect.minX, y: rect.minY, width: NotchLayout.cardWidth, height: rect.height)
+        case .trailing: card = CGRect(x: rect.minX + depth, y: rect.minY, width: NotchLayout.cardWidth, height: rect.height)
+        case .down, .up:
+            let height = rect.height - NotchLayout.tailGap - NotchLayout.tailLength
+            card = CGRect(x: rect.minX, y: model.edge.tooltipDirection == .down ? rect.maxY - height : rect.minY,
+                          width: rect.width, height: height)
+        }
+
+        // Walked up from the card's bottom edge, in the order `SessionList`
+        // draws them: "and N more", the idle rows, their header, the active rows.
+        let groups = activity.sessionGroups(now: model.now, cap: model.sessionCap,
+                                            showingIdle: model.showsIdleSessions)
+        let textX = card.minX + NotchLayout.cardPadding
+        let rowHeight = 2 * NotchLayout.cardBodyLineHeight + NotchLayout.sessionRowGap + 2 * NotchLayout.sessionRowPadding
+        var bottom = card.maxY - NotchLayout.cardPadding
+        var rows: [(rect: CGRect, session: AgentSession)] = []
+        var idleToggle: CGRect?
+        func placeRows(_ sessions: [AgentSession]) {
+            for session in sessions.reversed() {
+                rows.append((CGRect(x: textX - NotchLayout.sessionRowPadding, y: bottom - rowHeight,
+                                    width: NotchLayout.cardTextWidth + 2 * NotchLayout.sessionRowPadding,
+                                    height: rowHeight), session))
+                bottom -= rowHeight + NotchLayout.sessionRowSpacing
+            }
+        }
+        if groups.more > 0 { bottom -= NotchLayout.blockSpacing + NotchLayout.cardBodyLineHeight }
+        placeRows(groups.idle)
+        if groups.hasHeader {
+            let line = CGRect(x: textX, y: bottom - NotchLayout.cardBodyLineHeight,
+                              width: NotchLayout.cardTextWidth, height: NotchLayout.cardBodyLineHeight)
+            // A little taller than the line itself: it is a small target.
+            idleToggle = line.insetBy(dx: 0, dy: -NotchLayout.blockSpacing / 2)
+            bottom -= NotchLayout.blockSpacing + NotchLayout.cardBodyLineHeight
+        }
+        placeRows(groups.active)
+        return (rows, idleToggle)
+    }
+
+    private func permissionCardRect() -> CGRect? {
+        guard let request = model.permissionRequests.first else { return nil }
+        let height = PermissionCard.height(for: request, limit: model.permissionCardLimit)
+        let cardAcross = model.edge.isVertical ? PermissionCard.width : height
+        let cardAlong = model.edge.isVertical ? height : PermissionCard.width
+        let centre = model.tooltipAlong(index: model.permissionIndex, length: cardAlong)
+        return placement.rect(
+            along: centre - cardAlong / 2,
+            across: model.notchDrawnDepth,
+            length: cardAlong,
+            depth: NotchLayout.tailGap + NotchLayout.tailLength + cardAcross
+        )
+    }
+
+    /// The showing permission card and its frame without the tail, when
+    /// `local` is inside the card's region.
+    private func permissionCard(containing local: CGPoint) -> (PermissionRequest, CGRect)? {
+        guard model.isExpanded, let request = model.permissionRequests.first,
+              let rect = permissionCardRect(), rect.contains(local) else { return nil }
+        let height = PermissionCard.height(for: request, limit: model.permissionCardLimit)
+        let width = PermissionCard.width
+        switch model.edge.tooltipDirection {
+        case .leading:  return (request, CGRect(x: rect.minX, y: rect.minY, width: width, height: height))
+        case .trailing: return (request, CGRect(x: rect.maxX - width, y: rect.minY, width: width, height: height))
+        case .down:     return (request, CGRect(x: rect.minX, y: rect.maxY - height, width: width, height: height))
+        case .up:       return (request, CGRect(x: rect.minX, y: rect.minY, width: width, height: height))
+        }
+    }
+
+    /// Whether `local` is on the card's "Answer in <app>" button.
+    private func isOverAppLink(_ local: CGPoint) -> Bool {
+        guard let (request, card) = permissionCard(containing: local) else { return false }
+        return PermissionCard.appLinkRect(for: request, limit: model.permissionCardLimit).offsetBy(dx: card.minX, dy: card.minY).contains(local)
+    }
+
+    /// The permission card's choice row under `local`, counted from the rows'
+    /// top the way the card lays them out (`PermissionCard.choicesTop`).
+    private func permissionChoice(at local: CGPoint) -> Int? {
+        guard let (request, card) = permissionCard(containing: local) else { return nil }
+        let question = model.permissionQuestionIndex
+        let top = card.minY + PermissionCard.choicesTop(for: request, questionIndex: question,
+                                                        limit: model.permissionCardLimit)
+        let x = card.minX + PermissionCard.padding
+        guard local.x >= x, local.x <= card.maxX - PermissionCard.padding, local.y >= top else { return nil }
+        let pitch = PermissionCard.rowHeight + PermissionCard.rowGap
+        let index = Int((local.y - top) / pitch)
+        let withinRow = (local.y - top) - CGFloat(index) * pitch <= PermissionCard.rowHeight
+        return withinRow && index < PermissionCard.choiceCount(for: request, questionIndex: question) ? index : nil
+    }
+
+    /// Open the notch on a request from Claude Code and hold it open until the
+    /// list is empty. The fold that follows is the ordinary hover fold, so a
+    /// pointer resting on the notch keeps it open as it always would.
+    func showPermissionRequests(_ requests: [PermissionRequest]) {
+        let wasEmpty = model.permissionRequests.isEmpty
+        if requests.first?.id != model.permissionRequests.first?.id {
+            model.permissionQuestionIndex = 0
+            model.hoveredChoice = nil
+        }
+        withAnimation(.easeOut(duration: 0.18)) { model.permissionRequests = requests }
+        // The panel's size counts a pending card; re-solve it.
+        relocate()
+        if requests.isEmpty {
+            if !wasEmpty, let panel, !liveRect.contains(localCursor(in: panel.frame)) {
+                setExpanded(false)
+            }
+        } else if visibility != .hidden, let panel {
+            if !Runtime.isUnderTest { panel.orderFrontRegardless() }
+            foldWork?.cancel()
+            foldWork = nil
+            withAnimation(NotchMotion.unfold) { model.isExpanded = true }
+        }
+        updateInteractiveRects()
+    }
+
+    private func completionCardRect() -> CGRect? {
+        guard let event = model.activeCompletion else { return nil }
+        let index = model.completionIndex(for: event)
+        let cardAcross = model.edge.isVertical ? NotchLayout.cardWidth : CompletionCard.cardHeight
+        let cardAlong = model.edge.isVertical ? CompletionCard.cardHeight : NotchLayout.cardWidth
+        let centre = model.tooltipAlong(index: index, length: cardAlong)
+        return placement.rect(
+            along: centre - cardAlong / 2,
+            across: model.notchDrawnDepth,
+            length: cardAlong,
+            depth: NotchLayout.tailGap + NotchLayout.tailLength + cardAcross
+        )
+    }
+
+    /// Open the notch on a session that just stopped, with a card saying which
+    /// and that a click goes there. The click itself is the peek's own offer
+    /// (`pendingFocus`); the card lasts exactly as long as that offer shows.
+    @discardableResult
+    func showCompletion(_ event: SessionCompletionWatcher.Event, duration: TimeInterval) -> Bool {
+        guard visibility != .hidden, panel != nil else { return false }
+        withAnimation(.easeOut(duration: 0.18)) { model.activeCompletion = event }
+        peek(for: duration, focusing: event.session.processID)
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.model.activeCompletion == event else { return }
+                withAnimation(.easeOut(duration: 0.18)) { self.model.activeCompletion = nil }
+                self.model.isHoveringCompletion = false
+                self.updateInteractiveRects()
+            }
+        }
+        return true
+    }
+
     private func resetCardRect(event: UsageResetEvent) -> CGRect? {
         let index = model.resetAlertIndex(for: event) ?? 0
         let cardAcross = model.edge.isVertical ? NotchLayout.cardWidth : UsageResetCard.cardHeight
@@ -528,6 +709,12 @@ final class NotchWindowController {
     private func updateInteractiveRects() {
         var rects = [liveRect]
         if model.isExpanded, let event = model.activeResetAlert, let card = resetCardRect(event: event) {
+            rects.append(card)
+        }
+        if model.isExpanded, let card = permissionCardRect() {
+            rects.append(card)
+        }
+        if model.isExpanded, let card = completionCardRect() {
             rects.append(card)
         }
         if model.isExpanded, let index = model.hoveredIndex, let card = tooltipRect(index: index) {
@@ -648,9 +835,33 @@ final class NotchWindowController {
         if model.isHoveringMove != overMove {
             model.isHoveringMove = overMove
         }
+        let row = sessionRow(at: local)
+        if model.hoveredSessionID != row?.id {
+            model.hoveredSessionID = row?.id
+        }
+        let overIdleToggle = isOverIdleToggle(local)
+        if model.isHoveringIdleToggle != overIdleToggle {
+            model.isHoveringIdleToggle = overIdleToggle
+        }
+        let choice = permissionChoice(at: local)
+        if model.hoveredChoice != choice {
+            model.hoveredChoice = choice
+        }
+        let overAppLink = isOverAppLink(local)
+        if model.isHoveringAppLink != overAppLink {
+            model.isHoveringAppLink = overAppLink
+        }
+        let overCompletion = model.isExpanded && model.hoveredIndex == nil
+            && (completionCardRect()?.contains(local) ?? false)
+        if model.isHoveringCompletion != overCompletion {
+            model.isHoveringCompletion = overCompletion
+        }
+        // The ring under the pointer, not `target`: that also holds the hovered
+        // index while the pointer is on the card, and the card is not a button.
+        let overRing = model.isExpanded && notchRect.contains(local) && target != nil
         setPointing(
-            Self.wantsPointingHand(isExpanded: model.isExpanded, cellIndex: target)
-                || overHandle || overMove
+            Self.wantsPointingHand(isExpanded: model.isExpanded, cellIndex: overRing ? target : nil)
+                || overHandle || overMove || row != nil || choice != nil || overAppLink || overCompletion || overIdleToggle
         )
 
         if let target {
@@ -694,6 +905,8 @@ final class NotchWindowController {
         // A peek holds the notch open for its own duration; only after that
         // does the pointer get a say again.
         if let peekUntil, peekUntil > Date() { return }
+        // So does a request Claude Code is waiting on: it stays until answered.
+        if !model.permissionRequests.isEmpty { return }
         guard model.isExpanded, foldWork == nil, !model.isPinned else { return }
         // Pinned is settled above; what is left to decide is whether "Always
         // show" holds it, and only a frontmost full-screen app overrules that.
@@ -725,11 +938,24 @@ final class NotchWindowController {
     /// Pushed and popped rather than `set`, so leaving restores whatever cursor
     /// the app underneath had chosen. Setting `.arrow` on the way out would
     /// stamp an arrow over someone else's text caret.
+    ///
+    /// Held with a timer while wanted. Codenotch is never the active app, and
+    /// the app that is keeps receiving mouse moves anywhere on screen and
+    /// setting *its* cursor for whatever lies under the pointer in its own
+    /// window — an I-beam over a text field the notch happens to cover. The
+    /// last one to set the cursor wins, so the hand is set again thirty times
+    /// a second for as long as the pointer is on something clickable, and not
+    /// at all otherwise. Needs `BackgroundCursor.enable()`.
     private func setPointing(_ wanted: Bool) {
         guard wanted != isPointing else { return }
         isPointing = wanted
+        pointingTimer?.invalidate()
+        pointingTimer = nil
         if wanted {
             NSCursor.pointingHand.push()
+            let timer = Timer(timeInterval: 1.0 / 30, repeats: true) { _ in NSCursor.pointingHand.set() }
+            RunLoop.main.add(timer, forMode: .common)
+            pointingTimer = timer
         } else {
             NSCursor.pop()
         }
@@ -787,8 +1013,24 @@ final class NotchWindowController {
         // Clicks on the tooltip card belong to whatever is drawn there — the
         // session rows take their own taps — and must not fall through to the
         // cell refetch or the pin toggle underneath.
+        // A session row jumps to its terminal. Hit-tested here, like the
+        // rings, rather than left to SwiftUI's tap.
+        if let row = sessionRow(at: local), let pid = row.processID {
+            model.onFocusSession?(pid)
+            return
+        }
+        // "N idle" opens the folded sessions in place; "Hide idle" folds them.
+        if isOverIdleToggle(local) {
+            withAnimation(.easeOut(duration: 0.18)) { model.showsIdleSessions.toggle() }
+            updateInteractiveRects()
+            return
+        }
         if model.isExpanded, let index = model.hoveredIndex,
            let card = tooltipRect(index: index), card.contains(local) {
+            return
+        }
+        // The permission card's buttons take their own taps, the same way.
+        if model.isExpanded, let card = permissionCardRect(), card.contains(local) {
             return
         }
         guard model.isExpanded else {
@@ -1137,7 +1379,8 @@ final class NotchWindowController {
                 guard let self, let panel = self.panel else { return }
                 self.peekWork = nil
                 self.peekUntil = nil
-                let stillHoldsOpen = self.model.isPinned || (self.model.isAlwaysOn && !(self.foldsForFullScreen && self.isFullScreenActive()))
+                let stillHoldsOpen = self.model.isPinned || !self.model.permissionRequests.isEmpty
+                    || (self.model.isAlwaysOn && !(self.foldsForFullScreen && self.isFullScreenActive()))
                 guard !stillHoldsOpen else { return }
                 // Left open if the peek did its job and the pointer is already
                 // there; the ordinary hover fold takes it from here.

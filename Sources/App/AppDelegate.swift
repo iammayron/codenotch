@@ -11,6 +11,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var phoneLinkRegistry: PhoneLinkRegistry?
     private var activityCoordinator: ActivityCoordinator?
     private var ollamaRelay: OllamaActivityRelay?
+    /// Where Claude Code's permission prompts and questions arrive. See `HookBridge`.
+    private var hookBridge: HookBridge?
     private var lmstudioMetrics: LMStudioMetrics?
     private var preferences: Preferences?
     private var settings: SettingsWindowController?
@@ -95,6 +97,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
         guard !isRunningTests else { return }
         Self.retireOlderInstances()
+        BackgroundCursor.enable()
 
         // Before Preferences reads anything, or the first launch flag and
         // every choice would be read from an empty domain.
@@ -215,6 +218,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             let updater = Updater()
             self.updater = updater
+
+            let hookBridge = HookBridge(sessionDirectories: claudeProfiles.map(\.sessionsDirectory))
+            self.hookBridge = hookBridge
+            // The hook and the endpoint it posts to go on and off together.
+            // Re-applied at launch, so a hook removed by hand comes back while
+            // the setting says it should be there.
+            let profiles = claudeProfiles
+            preferences.$answerClaudeFromNotch
+                .removeDuplicates()
+                .sink { [weak hookBridge] enabled in
+                    for profile in profiles {
+                        do {
+                            try ClaudeHookInstaller.setInstalled(enabled, profile: profile)
+                        } catch {
+                            Log.sessions.error("hook \(enabled ? "install" : "removal", privacy: .public) failed for \(profile.displayPath, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                        }
+                    }
+                    if enabled {
+                        hookBridge?.start()
+                    } else {
+                        Task { @MainActor in await hookBridge?.stop() }
+                    }
+                }
+                .store(in: &cancellables)
 
             let relay = OllamaActivityRelay()
             self.ollamaRelay = relay
@@ -389,6 +416,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             fleet.onFocusSession = { pid in
                 Task { _ = await SessionFocus.focus(pid: pid) }
             }
+            // Claude Code's prompts, answered from the notch.
+            fleet.onDecidePermission = { [weak hookBridge] id, decision in
+                // "Answer in <app>": no decision from the notch, and a jump
+                // to where Claude's own prompt — with all its context — waits.
+                if decision == .passThrough,
+                   let pid = hookBridge?.pending.first(where: { $0.id == id })?.processID {
+                    Task { _ = await SessionFocus.focus(pid: pid) }
+                }
+                hookBridge?.answer(id, decision)
+            }
+            hookBridge.$pending
+                .removeDuplicates()
+                .receive(on: RunLoop.main)
+                .sink { [weak fleet] pending in fleet?.setPermissionRequests(pending) }
+                .store(in: &cancellables)
             self.settings = settings
 
             // What changed, once per version — including on a fresh install,
@@ -940,14 +982,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let event = events.first, let preferences, let fleet = notchFleet else { return }
         Log.usage.info("session \(event.session.name, privacy: .public) \(String(describing: event.reason), privacy: .public)")
 
+        // Already looking at it: nothing to announce, and a chime would only
+        // say what the screen in front of you already does.
+        // ponytail: app-level — a different tab or window of the same app
+        // counts as looking at it. Tab-level needs each terminal's scripting.
+        if let pid = event.session.processID,
+           let app = SessionFocus.owningApp(of: pid),
+           app.processIdentifier == NSWorkspace.shared.frontmostApplication?.processIdentifier {
+            return
+        }
+
         if preferences.sessionEndSound {
             SessionChime.play(event.reason == .blocked
                               ? preferences.sessionBlockedSoundName
                               : preferences.sessionEndSoundName)
         }
         guard preferences.announceSessionEnd else { return }
-        fleet.peek(for: preferences.peekDuration.seconds,
-                   focusing: event.session.processID)
+        fleet.showCompletion(event, duration: preferences.peekDuration.seconds)
     }
 
     /// Open the notch and show a usage reset notification modal when a limit resets.
@@ -1084,5 +1135,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         activityCoordinator?.stop()
         notchFleet?.stop()
         Task { await phoneLinkServer?.stop() }
+        Task { @MainActor in await hookBridge?.stop() }
     }
 }

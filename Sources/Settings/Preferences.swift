@@ -398,6 +398,13 @@ final class Preferences: ObservableObject {
     }
 
     /// Sound an alert alongside the usage reset notification modal.
+    /// Claude Code's permission prompts and questions, answered from the
+    /// notch. Turning it on writes a hook into each Claude profile's
+    /// `settings.json`; turning it off takes it out. See `ClaudeHookInstaller`.
+    @Published var answerClaudeFromNotch: Bool {
+        didSet { defaults.set(answerClaudeFromNotch, forKey: Keys.answerClaudeFromNotch) }
+    }
+
     @Published var usageResetSound: Bool {
         didSet { defaults.set(usageResetSound, forKey: Keys.usageResetSound) }
     }
@@ -527,6 +534,7 @@ final class Preferences: ObservableObject {
         static let sessionBlockedSoundName = "sessionBlockedSoundName"
         static let announceUsageReset = "announceUsageReset"
         static let usageResetSound = "usageResetSound"
+        static let answerClaudeFromNotch = "answerClaudeFromNotch"
         static let usageResetSoundName = "usageResetSoundName"
         static let announceSessionLimitReached = "announceSessionLimitReached"
         static let announceWeeklyLimitReached = "announceWeeklyLimitReached"
@@ -870,6 +878,7 @@ final class Preferences: ObservableObject {
             ?? SessionChime.defaultBlocked
         self.announceUsageReset = defaults.object(forKey: Keys.announceUsageReset) as? Bool ?? true
         self.usageResetSound = defaults.object(forKey: Keys.usageResetSound) as? Bool ?? true
+        self.answerClaudeFromNotch = defaults.bool(forKey: Keys.answerClaudeFromNotch)
         self.usageResetSoundName = defaults.string(forKey: Keys.usageResetSoundName)
             ?? SessionChime.defaultFinished
         self.announceSessionLimitReached = defaults.object(forKey: Keys.announceSessionLimitReached) as? Bool ?? true
